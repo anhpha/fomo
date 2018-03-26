@@ -4,7 +4,7 @@ package exchange
 type Market interface {
 	GetExchangeInfo() (interface{}, error)
 	GetPairInfo(symbol string) (Pair, error)
-	Fomo(pair string, amount float64, maxPrice float64, tk float64, sl float64, delay int, c chan error) error
+	Fomo(pair string, amount float64, buyPrice float64, maxPrice float64, tk float64, sl float64, delay int, c chan error) error
 	// NewInstance(key string, secret string) Market
 }
 

@@ -18,6 +18,7 @@ func main() {
 		sl        = flag.Float64("sl", 0.02, "Take profit after increase")
 		total     = flag.Float64("total", 0.01, "Total in btc")
 		maxPrice  = flag.Float64("maxPrice", 0, "Max price to buy")
+		buyPrice  = flag.Float64("buyPrice", 0, "Price to buy")
 		delay     = flag.Int("delay", 500, "Total in btc")
 	)
 
@@ -32,7 +33,7 @@ func main() {
 	if err != nil {
 		errs <- fmt.Errorf("Cannot get exchange info: %s", err)
 	} else {
-		binance.Fomo(pair, *total, *maxPrice, *tk, *sl, *delay, errs)
+		binance.Fomo(pair, *total, *buyPrice, *maxPrice, *tk, *sl, *delay, errs)
 	}
 	go func() {
 		c := make(chan os.Signal)

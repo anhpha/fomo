@@ -97,7 +97,7 @@ func (b *binance) tryToGetCurrentBestPrice(pair string, maxTry int, delay int) (
 	return result, fmt.Errorf("Cannot get current best price for %s", pair)
 }
 
-func (b *binance) Fomo(pair string, amount float64, maxPrice float64, tk float64, sl float64, delay int, c chan error) error {
+func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice float64, tk float64, sl float64, delay int, c chan error) error {
 	var openOderID int64
 	openOderID = 0
 	done := 0
@@ -108,19 +108,21 @@ func (b *binance) Fomo(pair string, amount float64, maxPrice float64, tk float64
 		c <- fmt.Errorf("Cannot get pair info: %v", err)
 		return err
 	}
-
-	marketSellPrice, err := b.tryToGetCurrentBestPrice(pair, 10, 200)
-	if err != nil {
-		fmt.Printf("Cannot get symbol info %s", err)
-		c <- err
-		return err
+	if buyPrice == 0 {
+		marketSellPrice, err := b.tryToGetCurrentBestPrice(pair, 10, 200)
+		if err != nil {
+			fmt.Printf("Cannot get symbol info %s", err)
+			c <- err
+			return err
+		}
+		buyPrice = marketSellPrice.BidPrice
 	}
 	// Default will not buy if price increase more than 1%
 	if maxPrice == 0 {
-		maxPrice = marketSellPrice.AskPrice * 1.1
+		maxPrice = buyPrice * 1.1
 	}
 
-	maxByPrice := amount / marketSellPrice.BidPrice
+	maxByPrice := amount / buyPrice
 
 	willBuyAmout := maxByPrice - math.Mod(maxByPrice, pairInfo.LotSize.Step)
 	hasError := 0
@@ -204,27 +206,40 @@ func (b *binance) MonitorAndStopLoss(pair string, order *binanceLib.CreateOrderR
 	needCancelOldOrder := 1
 
 	for done != 1 {
+		hasError := 0
 		currentOrder, err := b.GetOrderInfo(pair, order.OrderID, 100)
-		if err == nil && currentOrder.Status == "FILLED" {
-			fmt.Printf("*** Taken profit @ %v\n", currentOrder.Price)
-			done = 1
-			return nil
+		if err == nil {
+			hasError = 0
+			if currentOrder.Status == "FILLED" {
+				fmt.Printf("*** Taken profit @ %v\n", currentOrder.Price)
+				done = 1
+				needToStoploss = 0
+			}
+		} else {
+			hasError = 1
+
 		}
 		// Check price
-		if needToStoploss == 0 {
+		if needToStoploss == 0 && hasError == 0 {
 			bestPrice, err := b.GetPairCurrentBestPrice(pair)
-			if err == nil && bestPrice.AskPrice <= stopPrice {
-				needToStoploss = 1
-
+			if err == nil {
+				hasError = 0
+				if bestPrice.AskPrice <= stopPrice {
+					needToStoploss = 1
+				}
+			} else {
+				hasError = 1
 			}
 		}
-		if needToStoploss == 1 {
+		if needToStoploss == 1 && hasError == 0 {
 			// Cancel open order
 			if needCancelOldOrder == 1 {
 				err := b.tryToCancelOrder(pair, order.OrderID, 100)
 				if err == nil {
 					needCancelOldOrder = 0
-
+					hasError = 0
+				} else {
+					hasError = 1
 				}
 			}
 			// Try to sell at market price
@@ -240,6 +255,7 @@ func (b *binance) MonitorAndStopLoss(pair string, order *binanceLib.CreateOrderR
 		// try again after 0.2 s
 		time.Sleep(wait)
 	}
+
 	return fmt.Errorf("Cannot do stoploss for %v", order)
 }
 
