@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"pumpdump/helper"
 	"time"
 
@@ -98,6 +99,7 @@ func (b *binance) tryToGetCurrentBestPrice(pair string, maxTry int, delay int) (
 
 func (b *binance) Fomo(pair string, amount float64, maxPrice float64, tk float64, sl float64, delay int, c chan error) error {
 	var openOderID int64
+	openOderID = 0
 	done := 0
 
 	pairInfo, err := b.GetPairInfo(pair)
@@ -118,7 +120,9 @@ func (b *binance) Fomo(pair string, amount float64, maxPrice float64, tk float64
 		maxPrice = marketSellPrice.AskPrice * 1.1
 	}
 
-	willBuyAmout := amount / pairInfo.LotSize.Step
+	maxByPrice := amount / marketSellPrice.BidPrice
+
+	willBuyAmout := maxByPrice - math.Mod(maxByPrice, pairInfo.LotSize.Step)
 	hasError := 0
 	needToBuyMore := 1
 
