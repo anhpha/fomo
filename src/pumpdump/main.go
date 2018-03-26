@@ -24,7 +24,7 @@ func main() {
 
 	flag.Parse()
 
-	pair := *asset + "BTC"
+	pair := *asset
 
 	errs := make(chan error, 2)
 
@@ -41,5 +41,5 @@ func main() {
 		errs <- fmt.Errorf("%s", <-c)
 	}()
 
-	fmt.Printf("terminated: %v", <-errs)
+	fmt.Printf("terminated: %v\n", <-errs)
 }

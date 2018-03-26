@@ -34,7 +34,7 @@ func NewBinance(key string, secret string) Market {
 
 func (b *binance) GetExchangeInfo() (interface{}, error) {
 	infos, err := b.worker.NewExchangeInfoService().Do(context.Background())
-	if err != nil {
+	if err == nil {
 		b.exchageInfo = *infos
 		return infos, nil
 	}
@@ -103,8 +103,11 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 	done := 0
 
 	pairInfo, err := b.GetPairInfo(pair)
+
+	fmt.Printf("Will fomo on %v\n", pairInfo)
+
 	if err != nil {
-		fmt.Printf("Cannot get symbol info %s", err)
+		fmt.Printf("Cannot get symbol info %s\n", pair)
 		c <- fmt.Errorf("Cannot get pair info: %v", err)
 		return err
 	}
@@ -128,9 +131,12 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 	hasError := 0
 	needToBuyMore := 1
 
+	fmt.Printf("Will try to buy %v @ %v\n", willBuyAmout, buyPrice)
+
 	for done != 1 {
 		if openOderID > 0 {
 			openOrder, err := b.GetOrderInfo(pair, openOderID, 100)
+			fmt.Printf("Current opeing order %v\n", openOrder)
 			// Stop loop with error
 			if err == nil {
 				hasError = 0
@@ -148,6 +154,7 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 				// Cancel current "open" order
 				if openOrder.Status == "NEW" || openOrder.Status == "PARTIALLY_FILLED" {
 					checkingPrice, err := b.GetPairCurrentBestPrice(pair)
+					fmt.Printf("Current best bid price %v\n", checkingPrice.BidPrice)
 					// Cancel order if is not the best price
 					if err == nil && checkingPrice.BidPrice > helper.StringToFloat64(openOrder.Price) {
 						needToBuyMore = 1
@@ -183,6 +190,7 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 }
 
 func (b *binance) TryToSetTakeProfitAndStopLost(pair string, amount float64, profitPrice float64, lossPrice float64, maxTry int, delay int) error {
+	fmt.Printf("Trying to set profit order and stoploss order for %v %s (tk: %v, sl: %v)\n", amount, pair, profitPrice, lossPrice)
 	done := 0
 	tried := 0
 	for done != 1 && tried <= maxTry {
@@ -194,6 +202,9 @@ func (b *binance) TryToSetTakeProfitAndStopLost(pair string, amount float64, pro
 			return nil
 		}
 		tried++
+		wait := time.Duration(delay) * time.Millisecond
+		// try again after 0.2 s
+		time.Sleep(wait)
 	}
 	return nil
 }
@@ -284,13 +295,16 @@ func (b *binance) tryToBuyBestByMarket(pair string, amount float64, maxPrice flo
 		pairInfo, err := b.GetPairInfo(pair)
 		if err == nil {
 			bestPrice, err := b.GetPairCurrentBestPrice(pair)
+			fmt.Printf("Current best bid: %v\n", bestPrice.BidPrice)
 			if err == nil {
-				tryPrice := bestPrice.Bid + pairInfo.PriceFilter.Tick
+				tryPrice := bestPrice.BidPrice + pairInfo.PriceFilter.Tick
 				if tryPrice > maxPrice {
 					ok = -1
+					fmt.Printf("Price is too high @ %v\n", bestPrice.BidPrice)
 					return nil, errors.New("Price too high")
 				}
 				ok = 1
+				fmt.Printf("Setting order: %v\n", tryPrice)
 				return b.createLimitOrder(binanceLib.SideTypeBuy, binanceLib.OrderTypeLimit, pair, helper.Float64ToString(tryPrice), helper.Float64ToString(amount))
 			}
 		}
