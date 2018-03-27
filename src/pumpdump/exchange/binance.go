@@ -104,7 +104,8 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 
 	pairInfo, err := b.GetPairInfo(pair)
 
-	fmt.Printf("Will fomo on %v\n", pairInfo)
+	// fmt.Printf("Will fomo on %v\n", pairInfo)
+	// fmt.Printf("Min notional %v\n", pairInfo.MinNotional.Value)
 
 	if err != nil {
 		fmt.Printf("Cannot get symbol info %s\n", pair)
@@ -131,25 +132,22 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 	hasError := 0
 	needToBuyMore := 1
 
-	fmt.Printf("Will try to buy %v @ %v\n", willBuyAmout, buyPrice)
+	fmt.Printf("Will try to buy %v (%v USDT) @ %v\n", willBuyAmout, willBuyAmout*buyPrice, buyPrice)
 
 	for done != 1 {
 		if openOderID > 0 {
 			openOrder, err := b.GetOrderInfo(pair, openOderID, 100)
-			fmt.Printf("Current opeing order %v\n", openOrder)
+			fmt.Printf("Current opeing order %v @ %v: %v\n", openOrder.ExecutedQuantity, openOrder.Price, openOrder.Status)
 			// Stop loop with error
 			if err == nil {
+				willBuyAmout = willBuyAmout - helper.StringToFloat64(openOrder.ExecutedQuantity)
 				hasError = 0
 				// Done
 				if openOrder.Status == "FILLED" {
 					done = 1
 					needToBuyMore = 0
-				} else {
-					needToBuyMore = 1
-				}
-				// Continue to buy until filled
-				if openOrder.Status == "PARTIALLY_FILLED" {
-					willBuyAmout = willBuyAmout - helper.StringToFloat64(openOrder.ExecutedQuantity)
+					// Set take profit and stoploss
+					go b.TryToSetTakeProfitAndStopLost(pairInfo, helper.StringToFloat64(openOrder.Price), helper.StringToFloat64(openOrder.ExecutedQuantity), tk, sl, 100, delay, c)
 				}
 				// Cancel current "open" order
 				if openOrder.Status == "NEW" || openOrder.Status == "PARTIALLY_FILLED" {
@@ -157,13 +155,20 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 					fmt.Printf("Current best bid price %v\n", checkingPrice.BidPrice)
 					// Cancel order if is not the best price
 					if err == nil && checkingPrice.BidPrice > helper.StringToFloat64(openOrder.Price) {
-						needToBuyMore = 1
+						// Cancel opening order
 						err = b.tryToCancelOrder(pair, openOrder.OrderID, 100)
 						if err != nil {
 							hasError = 1
 						} else {
+							needToBuyMore = 1
 							hasError = 0
+							// Stoploss for executed amount
+							if openOrder.Status == "PARTIALLY_FILLED" {
+								// Set take profit and stoploss
+								go b.TryToSetTakeProfitAndStopLost(pairInfo, helper.StringToFloat64(openOrder.Price), helper.StringToFloat64(openOrder.ExecutedQuantity), tk, sl, 100, delay, c)
+							}
 						}
+
 					} else {
 						hasError = 1
 					}
@@ -172,13 +177,14 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 				hasError = 1
 			}
 		}
-		if hasError != 1 && needToBuyMore == 1 && willBuyAmout >= pairInfo.LotSize.Min {
+		if done != 1 && hasError != 1 && needToBuyMore == 1 && willBuyAmout >= pairInfo.LotSize.Min {
 			newOrder, err := b.tryToBuyBestByMarket(pair, willBuyAmout, maxPrice, delay)
 			if err == nil {
-				fmt.Printf("Order success: %v\n", newOrder)
+				fmt.Printf("Order success: %v @ %v\n", newOrder.ExecutedQuantity, newOrder.Price)
 				openOderID = newOrder.OrderID
-				// Set take profit and stoploss
-				go b.TryToSetTakeProfitAndStopLost(pair, helper.StringToFloat64(newOrder.ExecutedQuantity), tk, sl, 100, delay)
+				needToBuyMore = 0
+			} else {
+				fmt.Printf("Error when set limit order:%v\n", err)
 			}
 		}
 		// try again after 0.2 s
@@ -189,17 +195,25 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 	return nil
 }
 
-func (b *binance) TryToSetTakeProfitAndStopLost(pair string, amount float64, profitPrice float64, lossPrice float64, maxTry int, delay int) error {
-	fmt.Printf("Trying to set profit order and stoploss order for %v %s (tk: %v, sl: %v)\n", amount, pair, profitPrice, lossPrice)
+func (b *binance) TryToSetTakeProfitAndStopLost(pairInfo Pair, filledPrice float64, amount float64, tk float64, sl float64, maxTry int, delay int, contact chan error) error {
 	done := 0
 	tried := 0
+
+	profitPrice := filledPrice + b.CalculateChangePrice(filledPrice, tk, pairInfo.PriceFilter.Tick, true)
+	lossPrice := filledPrice - b.CalculateChangePrice(filledPrice, sl, pairInfo.PriceFilter.Tick, false)
+
+	fmt.Printf("Monitoring for  %s @ %v with profit @ %v and loss @ %v\n", pairInfo.Symbol, filledPrice, profitPrice, lossPrice)
+
 	for done != 1 && tried <= maxTry {
-		profitOrder, err := b.createLimitOrder(binanceLib.SideTypeBuy, binanceLib.OrderTypeLimit, pair, helper.Float64ToString(profitPrice), helper.Float64ToString(amount))
+		fmt.Printf("Try to take profit for %v @ %v (%v USDT)\n", amount, profitPrice, amount*profitPrice)
+		profitOrder, err := b.createLimitOrder(binanceLib.SideTypeSell, binanceLib.OrderTypeLimit, pairInfo.Symbol, helper.Float64ToString(profitPrice), helper.Float64ToString(amount))
 		if err == nil {
 			fmt.Printf("Will take profit with %v\n", profitOrder)
-			b.MonitorAndStopLoss(pair, profitOrder, lossPrice, delay)
+
+			b.MonitorAndStopLoss(pairInfo.Symbol, profitOrder, lossPrice, delay, contact)
 			done = 1
-			return nil
+		} else {
+			fmt.Printf("Error when setting profit order:%v\n", err)
 		}
 		tried++
 		wait := time.Duration(delay) * time.Millisecond
@@ -209,7 +223,7 @@ func (b *binance) TryToSetTakeProfitAndStopLost(pair string, amount float64, pro
 	return nil
 }
 
-func (b *binance) MonitorAndStopLoss(pair string, order *binanceLib.CreateOrderResponse, stopPrice float64, interval int) error {
+func (b *binance) MonitorAndStopLoss(pair string, order *binanceLib.CreateOrderResponse, stopPrice float64, interval int, contact chan error) error {
 	fmt.Printf("Motitoring pair: %s\n", pair)
 	done := 0
 
@@ -222,27 +236,30 @@ func (b *binance) MonitorAndStopLoss(pair string, order *binanceLib.CreateOrderR
 		if err == nil {
 			hasError = 0
 			if currentOrder.Status == "FILLED" {
-				fmt.Printf("*** Taken profit @ %v\n", currentOrder.Price)
+				contact <- fmt.Errorf("*** Taken profit @ %v", currentOrder.Price)
 				done = 1
 				needToStoploss = 0
+				return nil
 			}
 		} else {
 			hasError = 1
 
 		}
 		// Check price
-		if needToStoploss == 0 && hasError == 0 {
+		if needToStoploss == 0 && hasError == 0 && done != 1 {
 			bestPrice, err := b.GetPairCurrentBestPrice(pair)
 			if err == nil {
 				hasError = 0
-				if bestPrice.AskPrice <= stopPrice {
+				if bestPrice.BidPrice <= stopPrice {
 					needToStoploss = 1
 				}
 			} else {
 				hasError = 1
 			}
 		}
-		if needToStoploss == 1 && hasError == 0 {
+		if needToStoploss == 1 && hasError == 0 && done != 1 {
+			remainAmout := helper.StringToFloat64(order.OrigQuantity) - helper.StringToFloat64(currentOrder.ExecutedQuantity)
+			fmt.Printf("Try to stop loss for %v @ %v (%v USDT)\n", remainAmout, stopPrice, remainAmout*stopPrice)
 			// Cancel open order
 			if needCancelOldOrder == 1 {
 				err := b.tryToCancelOrder(pair, order.OrderID, 100)
@@ -253,13 +270,17 @@ func (b *binance) MonitorAndStopLoss(pair string, order *binanceLib.CreateOrderR
 					hasError = 1
 				}
 			}
-			// Try to sell at market price
-			slOrder, err := b.worker.NewCreateOrderService().Symbol(pair).
-				Side(binanceLib.SideTypeSell).Type(binanceLib.OrderTypeMarket).Quantity(order.ExecutedQuantity).Do(context.Background())
-			if err == nil {
-				done = 1
-				fmt.Printf(":(((( Stoploss @ %v\n", slOrder)
-				return nil
+			if hasError == 0 {
+				// Try to sell at market price
+				slOrder, err := b.worker.NewCreateOrderService().Symbol(pair).
+					Side(binanceLib.SideTypeSell).Type(binanceLib.OrderTypeMarket).Quantity(helper.Float64ToString(remainAmout)).Do(context.Background())
+				if err == nil {
+					done = 1
+					contact <- fmt.Errorf(":(((( Stoploss @ %v", slOrder)
+					return nil
+				} else {
+					fmt.Printf("Error when trying to stoploss: %v\n", err)
+				}
 			}
 		}
 		wait := time.Duration(interval) * time.Millisecond
@@ -342,4 +363,16 @@ func (b *binance) createLimitOrder(orderSide binanceLib.SideType, orderType bina
 		s = s.TimeInForce(binanceLib.TimeInForceGTC).Price(price)
 	}
 	return s.Do(context.Background())
+}
+
+func (b *binance) CalculateChangePrice(originalPrice float64, percent float64, tickSize float64, increase bool) float64 {
+	idealChange := originalPrice
+	if increase == true {
+		idealChange = originalPrice * (1 + percent)
+	} else {
+		idealChange = originalPrice * (1 - percent)
+	}
+	delta := math.Abs(idealChange - originalPrice)
+	return delta - math.Mod(delta, tickSize)
+
 }
