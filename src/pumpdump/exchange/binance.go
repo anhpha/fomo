@@ -415,25 +415,42 @@ func (b *binance) tryToGetListOpenOrders(pair string, try int) ([]*binanceLib.Or
 	return empty, fmt.Errorf("Cannot get list opening orders for pair %s", pair)
 }
 
-func (b *binance) TryToStopLossForOpenOders(pair string) []error {
+func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, delay int) []error {
 	var results []error
-	orders, err := b.tryToGetListOpenOrders(pair, 10)
-	if err == nil {
-		for _, order := range orders {
-			err = b.tryToCancelOrder(pair, order.OrderID, 10)
+	done := 0
+	for done == 0 {
+		bestPirce, err := b.GetPairCurrentBestPrice(pair)
+		if err != nil {
+			results = append(results, err)
+			return results
+		}
+		if bestPirce.BidPrice <= sl {
+			orders, err := b.tryToGetListOpenOrders(pair, 10)
 			if err == nil {
-				remainAmout := helper.StringToFloat64(order.OrigQuantity) - helper.StringToFloat64(order.ExecutedQuantity)
-				err = b.tryToSellAnyway(pair, remainAmout)
-				if err != nil {
-					results = append(results, err)
+				for _, order := range orders {
+					// lossPrice := filledPrice - b.CalculateChangePrice(or, sl, pairInfo.PriceFilter.Tick, false)
+					err = b.tryToCancelOrder(pair, order.OrderID, 10)
+					if err == nil {
+						remainAmout := helper.StringToFloat64(order.OrigQuantity) - helper.StringToFloat64(order.ExecutedQuantity)
+						err = b.tryToSellAnyway(pair, remainAmout)
+						if err != nil {
+							results = append(results, err)
+						}
+					} else {
+						results = append(results, err)
+					}
+				}
+				if len(results) == 0 {
+					done = 1
 				}
 			} else {
 				results = append(results, err)
 			}
 		}
-	} else {
-		results = append(results, err)
+		wait := time.Duration(delay) * time.Millisecond
+		time.Sleep(wait)
 	}
+
 	return results
 }
 
