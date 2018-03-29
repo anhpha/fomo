@@ -242,7 +242,7 @@ func (b *binance) MonitorAndStopLoss(pair string, order *binanceLib.CreateOrderR
 		if err == nil {
 			hasError = 0
 			if currentOrder.Status == "FILLED" {
-				contact <- fmt.Errorf("*** Taken profit @ %v", currentOrder.Price)
+				// contact <- fmt.Errorf("*** Taken profit @ %v", currentOrder.Price)
 				done = 1
 				needToStoploss = 0
 				return nil
@@ -278,11 +278,11 @@ func (b *binance) MonitorAndStopLoss(pair string, order *binanceLib.CreateOrderR
 			}
 			if hasError == 0 {
 				// Try to sell at market price
-				slOrder, err := b.worker.NewCreateOrderService().Symbol(pair).
+				_, err := b.worker.NewCreateOrderService().Symbol(pair).
 					Side(binanceLib.SideTypeSell).Type(binanceLib.OrderTypeMarket).Quantity(helper.Float64ToString(remainAmout)).Do(context.Background())
 				if err == nil {
 					done = 1
-					contact <- fmt.Errorf(":(((( Stoploss @ %v", slOrder)
+					// contact <- fmt.Errorf(":(((( Stoploss @ %v", slOrder)
 					return nil
 				} else {
 					fmt.Printf("Error when trying to stoploss: %v\n", err)
