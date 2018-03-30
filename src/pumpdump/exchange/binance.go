@@ -242,7 +242,7 @@ func (b *binance) MonitorAndStopLoss(pair string, order *binanceLib.CreateOrderR
 		if err == nil {
 			hasError = 0
 			if currentOrder.Status == "FILLED" {
-				// contact <- fmt.Errorf("*** Taken profit @ %v", currentOrder.Price)
+				fmt.Printf("*** Taken profit @ %v", currentOrder.Price)
 				done = 1
 				needToStoploss = 0
 				return nil
@@ -333,6 +333,7 @@ func (b *binance) tryToBuyBestByMarket(pair string, amount float64, buyPrice flo
 						return nil, errors.New("Price too high")
 					}
 					fmt.Printf("Setting order: %v\n", tryPrice)
+					fmt.Printf("Setting order @  : %v (after converted)\n", helper.Float64ToString(tryPrice))
 					order, err := b.createLimitOrder(binanceLib.SideTypeBuy, binanceLib.OrderTypeLimit, pair, helper.Float64ToString(tryPrice), helper.Float64ToString(amount))
 					if err == nil {
 						ok = 1
@@ -345,6 +346,8 @@ func (b *binance) tryToBuyBestByMarket(pair string, amount float64, buyPrice flo
 			if err == nil {
 				ok = 1
 				return order, err
+			} else {
+				fmt.Printf("Error when trying to buy: %v\n", err)
 			}
 		}
 		// try again after 0.2 s

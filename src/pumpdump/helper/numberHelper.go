@@ -5,7 +5,7 @@ import "strconv"
 // Float64ToString ...
 func Float64ToString(input float64) string {
 	// to convert a float number to a string
-	return strconv.FormatFloat(input, 'f', 7, 64)
+	return strconv.FormatFloat(input, 'f', 8, 64)
 }
 
 // StringToFloat64 ...
