@@ -2,10 +2,10 @@
 
 
 [[projects]]
-  name = "github.com/anhpha/go-binance"
+  name = "github.com/adshao/go-binance"
   packages = ["."]
-  revision = "e17c4f302135ccba5d17c5a98fac16b28810ef8a"
-  version = "1.0.1"
+  revision = "573065ec71e06d5f510d79ef859d387ecfbaa7c3"
+  version = "1.1.1"
 
 [[projects]]
   name = "github.com/bitly/go-simplejson"
@@ -22,6 +22,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "3b54ff0b771f45a88ffd32ef2882ab1b1a21f2f107baf780abc0d5fa6246ac88"
+  inputs-digest = "296872df3ab7b97e0af9731b4076779523f7468603e279e33087bd931213985e"
   solver-name = "gps-cdcl"
   solver-version = 1

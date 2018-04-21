@@ -37,13 +37,15 @@ func main() {
 	// lossPrice := filledPrice - b.CalculateChangePrice(or, sl, pairInfo.PriceFilter.Tick, false)
 
 	if err != nil {
-		errs <- fmt.Errorf("Cannot get exchange info: %s", err)
+		errs <- fmt.Errorf("Cannot get exchange info: %v", err)
 	} else {
 		if *stoplossOnly == 1 {
-			stoplossErrs := binance.TryToStopLossForOpenOders(pair, *stoplossOnlyPrice, *delay)
+			stoplossErrs := binance.TryToStopLossForOpenOders(pair, *stoplossOnlyPrice, *delay, errs)
 			if len(stoplossErrs) > 0 {
 				fmt.Printf("Finished with errors: %v", stoplossErrs)
+				// stopC <- struct{}{}
 			}
+			// <-doneC
 			// errs <- fmt.Errorf("Stopped protecting pair %s", pair)
 		} else {
 			binance.Fomo(pair, *total, *buyPrice, *maxPrice, *tk, *sl, *race, *delay, errs)

@@ -28,3 +28,11 @@
 [[constraint]]
   name = "github.com/anhpha/go-binance"
   version = "1.0.1"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/binance-exchange/go-binance"
+
+[[constraint]]
+  name = "github.com/go-kit/kit"
+  version = "0.6.0"

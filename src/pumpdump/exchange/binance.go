@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
+	"net/http"
+	"os"
 	"pumpdump/helper"
 	"time"
 
-	binanceLib "github.com/anhpha/go-binance"
+	binanceLib "github.com/adshao/go-binance"
 )
 
 type binance struct {
@@ -28,12 +31,21 @@ func NewBinance(key string, secret string) Market {
 	return &binance{
 		key:    key,
 		secret: secret,
-		worker: binanceLib.NewClient(key, secret),
+		worker: &binanceLib.Client{
+			APIKey:     key,
+			SecretKey:  secret,
+			BaseURL:    "https://api.binance.com",
+			UserAgent:  "curl/7.47.0",
+			HTTPClient: http.DefaultClient,
+			Debug:      false,
+			Logger:     log.New(os.Stdout, "Binance-golang ", log.LstdFlags),
+		},
 	}
 }
 
 func (b *binance) GetExchangeInfo() (interface{}, error) {
 	infos, err := b.worker.NewExchangeInfoService().Do(context.Background())
+	// fmt.Printf("Info: %v\n", infos)
 	if err == nil {
 		b.exchageInfo = *infos
 		return infos, nil
@@ -308,7 +320,7 @@ func (b *binance) GetOrderInfo(pair string, orderID int64, maxTry int) (*binance
 			return order, nil
 		}
 		// try again after 0.2 s
-		wait := 200 * time.Millisecond
+		wait := 500 * time.Millisecond
 		// try again after 0.2 s
 		time.Sleep(wait)
 		tried++
@@ -338,6 +350,8 @@ func (b *binance) tryToBuyBestByMarket(pair string, amount float64, buyPrice flo
 					if err == nil {
 						ok = 1
 						return order, err
+					} else {
+						fmt.Printf("Setting order error: %v\n", err)
 					}
 				}
 			}
@@ -368,7 +382,7 @@ func (b *binance) tryToCancelOrder(pair string, orderID int64, maxTry int) error
 			return nil
 		}
 		// try again after 0.2 s
-		wait := 200 * time.Millisecond
+		wait := 500 * time.Millisecond
 		// try again after 0.2 s
 		time.Sleep(wait)
 		tried++
@@ -411,48 +425,108 @@ func (b *binance) tryToGetListOpenOrders(pair string, try int) ([]*binanceLib.Or
 			return results, err
 		}
 		// try again after 0.2 s
-		wait := 200 * time.Millisecond
+		wait := 500 * time.Millisecond
 		time.Sleep(wait)
 		tried++
 	}
 	return empty, fmt.Errorf("Cannot get list opening orders for pair %s", pair)
 }
 
-func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, delay int) []error {
-	var results []error
-	done := 0
-	for done == 0 {
-		bestPirce, err := b.GetPairCurrentBestPrice(pair)
-		if err != nil {
-			results = append(results, err)
-			return results
-		}
-		if bestPirce.BidPrice <= sl {
-			orders, err := b.tryToGetListOpenOrders(pair, 10)
-			if err == nil {
-				for _, order := range orders {
-					// lossPrice := filledPrice - b.CalculateChangePrice(or, sl, pairInfo.PriceFilter.Tick, false)
-					err = b.tryToCancelOrder(pair, order.OrderID, 10)
-					if err == nil {
-						remainAmout := helper.StringToFloat64(order.OrigQuantity) - helper.StringToFloat64(order.ExecutedQuantity)
-						err = b.tryToSellAnyway(pair, remainAmout)
-						if err != nil {
-							results = append(results, err)
-						}
-					} else {
-						results = append(results, err)
-					}
-				}
-				if len(results) == 0 {
-					done = 1
-				}
-			} else {
-				results = append(results, err)
-			}
-		}
-		wait := time.Duration(delay) * time.Millisecond
-		time.Sleep(wait)
+func getBestPriceFromDepthEvent(event *binanceLib.WsDepthEvent) (float64, error) {
+	bestPrice := 0.0
+	if len(event.Bids) == 0 {
+		return bestPrice, errors.New("Empty data from server")
 	}
+	bestPrice = helper.StringToFloat64(event.Bids[0].Price)
+	return bestPrice, nil
+}
+
+func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, delay int, terminater chan error) []error {
+	var results []error
+	// done := 0
+
+	wsDepthHandler := func(event *binanceLib.WsDepthEvent) {
+		bestPirce, err := getBestPriceFromDepthEvent(event)
+		if err == nil {
+
+			// terminater <- fmt.Errorf("%s", err)
+			// return
+			fmt.Printf("Best Price : %v, Stoploss: %v\n", bestPirce, sl)
+			if bestPirce <= sl {
+				fmt.Println("Trying to stoploss")
+				orders, err := b.tryToGetListOpenOrders(pair, 10)
+				if err == nil {
+					for _, order := range orders {
+						// lossPrice := filledPrice - b.CalculateChangePrice(or, sl, pairInfo.PriceFilter.Tick, false)
+						err = b.tryToCancelOrder(pair, order.OrderID, 10)
+						if err == nil {
+							remainAmout := helper.StringToFloat64(order.OrigQuantity) - helper.StringToFloat64(order.ExecutedQuantity)
+							err = b.tryToSellAnyway(pair, remainAmout)
+							if err != nil {
+								fmt.Println(err)
+								terminater <- fmt.Errorf("%s", err)
+							}
+						} else {
+							fmt.Println(err)
+							terminater <- fmt.Errorf("%s", err)
+						}
+					}
+					terminater <- fmt.Errorf("%s", err)
+				} else {
+					fmt.Println(err)
+					terminater <- fmt.Errorf("%s", err)
+				}
+			}
+		} else {
+			fmt.Println(err)
+		}
+	}
+	errHandler := func(err error) {
+		results = append(results, err)
+		fmt.Println(err)
+		terminater <- fmt.Errorf("%s", err)
+	}
+	doneC, stopC, err := binanceLib.WsDepthServe(pair, wsDepthHandler, errHandler)
+	if err != nil {
+		fmt.Println(err)
+		results = append(results, err)
+		stopC <- struct{}{}
+		terminater <- fmt.Errorf("%s", err)
+	}
+	<-doneC
+
+	// for done == 0 {
+	// 	bestPirce, err := b.GetPairCurrentBestPrice(pair)
+	// 	if err != nil {
+	// 		results = append(results, err)
+	// 		return results
+	// 	}
+	// 	if bestPirce.BidPrice <= sl {
+	// 		orders, err := b.tryToGetListOpenOrders(pair, 10)
+	// 		if err == nil {
+	// 			for _, order := range orders {
+	// 				// lossPrice := filledPrice - b.CalculateChangePrice(or, sl, pairInfo.PriceFilter.Tick, false)
+	// 				err = b.tryToCancelOrder(pair, order.OrderID, 10)
+	// 				if err == nil {
+	// 					remainAmout := helper.StringToFloat64(order.OrigQuantity) - helper.StringToFloat64(order.ExecutedQuantity)
+	// 					err = b.tryToSellAnyway(pair, remainAmout)
+	// 					if err != nil {
+	// 						results = append(results, err)
+	// 					}
+	// 				} else {
+	// 					results = append(results, err)
+	// 				}
+	// 			}
+	// 			if len(results) == 0 {
+	// 				done = 1
+	// 			}
+	// 		} else {
+	// 			results = append(results, err)
+	// 		}
+	// 	}
+	// 	wait := time.Duration(delay) * time.Millisecond
+	// 	time.Sleep(wait)
+	// }
 
 	return results
 }
@@ -469,7 +543,7 @@ func (b *binance) tryToSellAnyway(pair string, amount float64) error {
 			return nil
 		}
 		// try again after 0.2 s
-		wait := 200 * time.Millisecond
+		wait := 500 * time.Millisecond
 		time.Sleep(wait)
 		tried++
 	}
