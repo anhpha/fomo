@@ -432,7 +432,7 @@ func (b *binance) tryToGetListOpenOrders(pair string, try int) ([]*binanceLib.Or
 	return empty, fmt.Errorf("Cannot get list opening orders for pair %s", pair)
 }
 
-func getBestPriceFromDepthEvent(event *binanceLib.WsDepthEvent) (float64, error) {
+func getBestPriceFromDepthEvent(event *binanceLib.WsPartialDepthEvent) (float64, error) {
 	bestPrice := 0.0
 	if len(event.Bids) == 0 {
 		return bestPrice, errors.New("Empty data from server")
@@ -445,7 +445,7 @@ func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, delay int, 
 	var results []error
 	// done := 0
 
-	wsDepthHandler := func(event *binanceLib.WsDepthEvent) {
+	wsDepthHandler := func(event *binanceLib.WsPartialDepthEvent) {
 		bestPirce, err := getBestPriceFromDepthEvent(event)
 		if err == nil {
 
@@ -486,7 +486,7 @@ func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, delay int, 
 		fmt.Println(err)
 		terminater <- fmt.Errorf("%s", err)
 	}
-	doneC, stopC, err := binanceLib.WsDepthServe(pair, wsDepthHandler, errHandler)
+	doneC, stopC, err := binanceLib.WsPartialDepthServe(pair, "5", wsDepthHandler, errHandler)
 	if err != nil {
 		fmt.Println(err)
 		results = append(results, err)
