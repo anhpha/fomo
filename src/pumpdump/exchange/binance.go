@@ -443,91 +443,71 @@ func getBestPriceFromDepthEvent(event *binanceLib.WsPartialDepthEvent) (float64,
 
 func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, delay int, terminater chan error) []error {
 	var results []error
+	fc := make(chan string)
 	// done := 0
+	doneSL := 0
+	age := 0
 
 	wsDepthHandler := func(event *binanceLib.WsPartialDepthEvent) {
+		age++
 		bestPirce, err := getBestPriceFromDepthEvent(event)
 		if err == nil {
-
-			// terminater <- fmt.Errorf("%s", err)
-			// return
-			fmt.Printf("Best Price : %v, Stoploss: %v\n", bestPirce, sl)
+			if age % 30 == 0 {
+				fmt.Printf("Best Price : %v, Stoploss: %v\n", bestPirce, sl)
+			}
 			if bestPirce <= sl {
-				fmt.Println("Trying to stoploss")
-				orders, err := b.tryToGetListOpenOrders(pair, 10)
-				if err == nil {
-					for _, order := range orders {
-						// lossPrice := filledPrice - b.CalculateChangePrice(or, sl, pairInfo.PriceFilter.Tick, false)
-						err = b.tryToCancelOrder(pair, order.OrderID, 10)
-						if err == nil {
-							remainAmout := helper.StringToFloat64(order.OrigQuantity) - helper.StringToFloat64(order.ExecutedQuantity)
-							err = b.tryToSellAnyway(pair, remainAmout)
-							if err != nil {
-								fmt.Println(err)
-								terminater <- fmt.Errorf("%s", err)
+				var errs []error
+				for doneSL == 0 {
+					fmt.Println("Trying to stoploss\n")
+					orders, err := b.tryToGetListOpenOrders(pair, 10)
+					if err == nil {
+						for _, order := range orders {
+							err = b.tryToCancelOrder(pair, order.OrderID, 10)
+							if err == nil {
+								remainAmout := helper.StringToFloat64(order.OrigQuantity) - helper.StringToFloat64(order.ExecutedQuantity)
+								err = b.tryToSellAnyway(pair, remainAmout)
+								if err != nil {
+									fmt.Println(err)
+									errs = append(errs, err)
+								}
+							} else {
+								errs = append(errs, err)
 							}
-						} else {
-							fmt.Println(err)
-							terminater <- fmt.Errorf("%s", err)
 						}
+					} else {
+						fmt.Println(err)
+						errs = append(errs, err)
 					}
-					terminater <- fmt.Errorf("%s", err)
-				} else {
-					fmt.Println(err)
-					terminater <- fmt.Errorf("%s", err)
+
+					if len(errs) == 0 {
+						doneSL = 1
+						fc <- "**** Done stop loss"
+					} else {
+						wait := 1000 * time.Millisecond
+						time.Sleep(wait)
+					}
+					
 				}
 			}
+		
 		} else {
 			fmt.Println(err)
 		}
+	
 	}
 	errHandler := func(err error) {
 		results = append(results, err)
 		fmt.Println(err)
 		terminater <- fmt.Errorf("%s", err)
 	}
-	doneC, stopC, err := binanceLib.WsPartialDepthServe(pair, "5", wsDepthHandler, errHandler)
+	_, stopC, err := binanceLib.WsPartialDepthServe(pair, "5", wsDepthHandler, errHandler)
 	if err != nil {
 		fmt.Println(err)
 		results = append(results, err)
 		stopC <- struct{}{}
 		terminater <- fmt.Errorf("%s", err)
 	}
-	<-doneC
-
-	// for done == 0 {
-	// 	bestPirce, err := b.GetPairCurrentBestPrice(pair)
-	// 	if err != nil {
-	// 		results = append(results, err)
-	// 		return results
-	// 	}
-	// 	if bestPirce.BidPrice <= sl {
-	// 		orders, err := b.tryToGetListOpenOrders(pair, 10)
-	// 		if err == nil {
-	// 			for _, order := range orders {
-	// 				// lossPrice := filledPrice - b.CalculateChangePrice(or, sl, pairInfo.PriceFilter.Tick, false)
-	// 				err = b.tryToCancelOrder(pair, order.OrderID, 10)
-	// 				if err == nil {
-	// 					remainAmout := helper.StringToFloat64(order.OrigQuantity) - helper.StringToFloat64(order.ExecutedQuantity)
-	// 					err = b.tryToSellAnyway(pair, remainAmout)
-	// 					if err != nil {
-	// 						results = append(results, err)
-	// 					}
-	// 				} else {
-	// 					results = append(results, err)
-	// 				}
-	// 			}
-	// 			if len(results) == 0 {
-	// 				done = 1
-	// 			}
-	// 		} else {
-	// 			results = append(results, err)
-	// 		}
-	// 	}
-	// 	wait := time.Duration(delay) * time.Millisecond
-	// 	time.Sleep(wait)
-	// }
-
+	fmt.Printf("Stop monitoring: %v\n", <-fc)
 	return results
 }
 
