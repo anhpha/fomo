@@ -2,6 +2,7 @@ package exchange
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -109,10 +110,105 @@ func (b *binance) tryToGetCurrentBestPrice(pair string, maxTry int, delay int) (
 	return result, fmt.Errorf("Cannot get current best price for %s", pair)
 }
 
-func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice float64, tk float64, sl float64, race int, delay int, c chan error) error {
-	var openOderID int64
-	openOderID = 0
-	done := 0
+type executedOrder struct {
+	orderID              int64
+	symbol               string
+	price                float64
+	lastExecutedQuantity float64
+	lastExecutedPrice    float64
+	currentOrderStatus   string
+}
+
+func getExecutedOrderFromStream(data []byte, orderID int64) (executedOrder, error) {
+	var result executedOrder
+
+	var jsonData map[string]interface{}
+	if err := json.Unmarshal(data, &jsonData); err != nil {
+		return result, err
+	}
+	eventType, ok := jsonData["e"].(string)
+	if !ok {
+		return result, errors.New("Invalid event")
+	}
+	if eventType != "executionReport" {
+		return result, errors.New("Invalid event")
+	}
+	i, ok := jsonData["i"].(int64)
+	if !ok || i != orderID {
+		return result, errors.New("Invalid event")
+	}
+	s, ok := jsonData["s"].(string)
+	if !ok {
+		return result, errors.New("Invalid event")
+	}
+	L, ok := jsonData["L"].(string)
+	if !ok {
+		return result, errors.New("Invalid event")
+	}
+	p, ok := jsonData["p"].(string)
+	if !ok {
+		return result, errors.New("Invalid event")
+	}
+	l, ok := jsonData["l"].(string)
+	if !ok {
+		return result, errors.New("Invalid event")
+	}
+	X, ok := jsonData["X"].(string)
+	if !ok {
+		return result, errors.New("Invalid event")
+	}
+	result.orderID = i
+	result.symbol = s
+	result.price = helper.StringToFloat64(p)
+	result.lastExecutedPrice = helper.StringToFloat64(L)
+	result.lastExecutedQuantity = helper.StringToFloat64(l)
+	result.currentOrderStatus = X
+	return result, nil
+}
+
+func (b *binance) oderInfoChanel() (data chan []byte, doneC chan struct{}, stopC chan struct{}, listenKey string, e error) {
+	data = make(chan []byte)
+
+	listenKey, err := b.worker.NewStartUserStreamService().Do(context.Background())
+	if err != nil {
+		return data, doneC, stopC, listenKey, err
+	}
+
+	wsHandler := func(message []byte) {
+		// // for {
+		// select {
+		// case orderID := <-orderIDChan:
+		// 	monitoringID := orderID
+		// default:
+		// 	executedOrder, err := getExecutedOrderFromStream(message, monitoringID)
+		// 	if err == nil {
+		// 		data <- executedOrder
+		// 	}
+		// }
+		// }
+		data <- message
+
+	}
+	errHandler := func(err error) {
+		fmt.Println(err)
+	}
+	doneC, stopC, err = binanceLib.WsUserDataServe(listenKey, wsHandler, errHandler)
+	if err != nil {
+		fmt.Println(err)
+		return data, doneC, stopC, listenKey, err
+	}
+	fmt.Println("Started user stream...")
+
+	// <-doneC
+	return
+}
+
+func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice float64,
+	tk float64, sl float64, race int, delay int, c chan error) (terminater chan error, e error) {
+
+	// var openOderID int64
+	// openOderID = 0
+	// done := 0
 
 	pairInfo, err := b.GetPairInfo(pair)
 
@@ -122,14 +218,15 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 	if err != nil {
 		fmt.Printf("Cannot get symbol info %s\n", pair)
 		c <- fmt.Errorf("Cannot get pair info: %v", err)
-		return err
+		return
 	}
+
 	if buyPrice == 0 {
 		marketSellPrice, err := b.tryToGetCurrentBestPrice(pair, 10, 200)
 		if err != nil {
 			fmt.Printf("Cannot get symbol info %s", err)
 			c <- err
-			return err
+			return nil, err
 		}
 		buyPrice = marketSellPrice.BidPrice
 	} else {
@@ -141,76 +238,101 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 		maxPrice = buyPrice * 1.1
 	}
 
-	maxByPrice := amount / buyPrice
+	maxBuyPrice := amount / buyPrice
 
-	willBuyAmout := maxByPrice - math.Mod(maxByPrice, pairInfo.LotSize.Step)
-	hasError := 0
-	needToBuyMore := 1
+	willBuyAmout := maxBuyPrice - math.Mod(maxBuyPrice, pairInfo.LotSize.Step)
+	// hasError := 0
+	// needToBuyMore := 1
 
 	fmt.Printf("Will try to buy %v (%v USDT) @ %v\n", willBuyAmout, willBuyAmout*buyPrice, buyPrice)
-
-	for done != 1 {
-
-		if openOderID > 0 {
-			openOrder, err := b.GetOrderInfo(pair, openOderID, 100)
-			// fmt.Printf("Current opeing order %v @ %v: %v\n", openOrder.ExecutedQuantity, openOrder.Price, openOrder.Status)
-			// Stop loop with error
-			if err == nil {
-				willBuyAmout = willBuyAmout - helper.StringToFloat64(openOrder.ExecutedQuantity)
-				hasError = 0
-				// Done
-				if openOrder.Status == "FILLED" {
-					done = 1
-					needToBuyMore = 0
-					// Set take profit and stoploss
-					go b.TryToSetTakeProfitAndStopLost(pairInfo, helper.StringToFloat64(openOrder.Price), helper.StringToFloat64(openOrder.ExecutedQuantity), tk, sl, 100, delay, c)
-				}
-				// In case you want to race to buy
-				// Cancel current "open" order
-				if (openOrder.Status == "NEW" || openOrder.Status == "PARTIALLY_FILLED") && race == 1 {
-					checkingPrice, err := b.GetPairCurrentBestPrice(pair)
-					fmt.Printf("Current best bid price %v\n", checkingPrice.BidPrice)
-					// Cancel order if is not the best price
-					if err == nil && checkingPrice.BidPrice > helper.StringToFloat64(openOrder.Price) {
-						// Cancel opening order
-						err = b.tryToCancelOrder(pair, openOrder.OrderID, 100)
-						if err != nil {
-							hasError = 1
-						} else {
-							needToBuyMore = 1
-							hasError = 0
-							// Stoploss for executed amount
-							if openOrder.Status == "PARTIALLY_FILLED" {
-								// Set take profit and stoploss
-								go b.TryToSetTakeProfitAndStopLost(pairInfo, helper.StringToFloat64(openOrder.Price), helper.StringToFloat64(openOrder.ExecutedQuantity), tk, sl, 100, delay, c)
-							}
-						}
-
-					} else {
-						hasError = 1
-					}
-				}
-			} else {
-				hasError = 1
-			}
-		}
-		// fmt.Printf("Need to buy more :%v\n", needToBuyMore)
-		if done != 1 && hasError != 1 && needToBuyMore == 1 && willBuyAmout >= pairInfo.LotSize.Min {
-			newOrder, err := b.tryToBuyBestByMarket(pair, willBuyAmout, buyPrice, maxPrice, race, delay)
-			if err == nil {
-				fmt.Printf("Order success: %v @ %v\n", newOrder.ExecutedQuantity, newOrder.Price)
-				openOderID = newOrder.OrderID
-				needToBuyMore = 0
-			} else {
-				fmt.Printf("Error when set limit order:%v\n", err)
-			}
-		}
-		// try again after 0.2 s
-		wait := time.Duration(delay) * time.Millisecond
-		// try again after 0.2 s
-		time.Sleep(wait)
+	// newOrder, err := b.tryToSetLimitOrder(pair, willBuyAmout, buyPrice, maxPrice, race, delay)
+	order, err := b.createLimitOrder(binanceLib.SideTypeBuy, binanceLib.OrderTypeLimit, pair,
+		helper.Float64ToString(buyPrice), helper.Float64ToString(willBuyAmout))
+	if err != nil {
+		fmt.Printf("Cannot set buy order: %v\n", err)
+		return nil, err
 	}
-	return nil
+	bestPriceChan, _, priceStopC, err := b.GetBestPriceChanel(pair)
+
+	if err != nil {
+		fmt.Printf("Cannot listen price for %s\n", pair)
+		c <- fmt.Errorf("Cannot listen price: %v", err)
+		return nil, err
+	}
+	bookingOrderID := order.OrderID
+	bookingPrice := helper.StringToFloat64(order.Price)
+	currentBestPrice := buyPrice
+	filledAmount := 0.0
+	var currentExecutedOrder executedOrder
+
+	startedStoploss := 0
+
+	terminater = make(chan error, 2)
+	userStream, _, stopC, listenKey, err := b.oderInfoChanel()
+	if err == nil {
+		go func() {
+			defer close(userStream)
+			// defer close(terminater)
+			done := 0
+			for done == 0 {
+				fmt.Println("Listening...")
+				select {
+				case cause := <-terminater:
+					fmt.Printf("Stop stream caused by: %s", cause.Error())
+					b.worker.NewCloseUserStreamService().ListenKey(listenKey).Do(context.Background())
+					priceStopC <- struct{}{}
+					stopC <- struct{}{}
+
+					done = 1
+					return
+				case data := <-userStream:
+					currentExecutedOrder, err = getExecutedOrderFromStream(data, bookingOrderID)
+					if err == nil {
+						// Update filled amount
+						filledAmount += currentExecutedOrder.lastExecutedQuantity
+						// Protect filled buy monitorig and stoploss. Only start 1 time
+						if (currentExecutedOrder.currentOrderStatus == "FILLED" ||
+							currentExecutedOrder.currentOrderStatus == "PARTIALLY_FILLED") && startedStoploss == 0 {
+							go b.TryToStopLossForOpenOders(pair, sl, delay, c)
+							startedStoploss = 1
+						}
+					}
+				default:
+					bestPrice := <-bestPriceChan
+					currentBestPrice = bestPrice.bid
+					if currentBestPrice > bookingPrice && race == 1 && currentBestPrice <= maxBuyPrice {
+						// Truy to update order
+						err := b.tryToCancelOrder(pair, bookingOrderID, 100)
+						if err != nil {
+							fmt.Printf("Cannot cancel opening order: %v", err)
+							b.worker.NewCloseUserStreamService().ListenKey(listenKey).Do(context.Background())
+							priceStopC <- struct{}{}
+							stopC <- struct{}{}
+
+							done = 1
+							return
+						}
+						newOrder, err := b.tryToSetLimitOrder(pair, willBuyAmout-filledAmount, currentBestPrice, delay)
+						if err != nil {
+							fmt.Printf("Cannot cancel opening order: %v", err)
+							b.worker.NewCloseUserStreamService().ListenKey(listenKey).Do(context.Background())
+							priceStopC <- struct{}{}
+							stopC <- struct{}{}
+
+							done = 1
+							return
+						}
+						// Update order id for monitoring
+						bookingOrderID = newOrder.OrderID
+					}
+
+				}
+			}
+		}()
+	} else {
+		fmt.Printf("Cannot start user stream: %v\n", err)
+	}
+	return
 }
 
 func (b *binance) TryToSetTakeProfitAndStopLost(pairInfo Pair, filledPrice float64, amount float64, tk float64, sl float64, maxTry int, delay int, contact chan error) error {
@@ -329,41 +451,15 @@ func (b *binance) GetOrderInfo(pair string, orderID int64, maxTry int) (*binance
 }
 
 // Incase race, buyPrice will be ignore
-func (b *binance) tryToBuyBestByMarket(pair string, amount float64, buyPrice float64, maxPrice float64, race int, interval int) (*binanceLib.CreateOrderResponse, error) {
+func (b *binance) tryToSetLimitOrder(pair string, amount float64, buyPrice float64, interval int) (*binanceLib.CreateOrderResponse, error) {
 	ok := 0
 	for ok == 0 {
-		if race == 1 {
-			pairInfo, err := b.GetPairInfo(pair)
-			if err == nil {
-				bestPrice, err := b.GetPairCurrentBestPrice(pair)
-				fmt.Printf("Current best bid: %v\n", bestPrice.BidPrice)
-				if err == nil {
-					tryPrice := bestPrice.BidPrice + pairInfo.PriceFilter.Tick
-					if tryPrice > maxPrice {
-						ok = -1
-						fmt.Printf("Price is too high @ %v\n", bestPrice.BidPrice)
-						return nil, errors.New("Price too high")
-					}
-					fmt.Printf("Setting order: %v\n", tryPrice)
-					fmt.Printf("Setting order @  : %v (after converted)\n", helper.Float64ToString(tryPrice))
-					order, err := b.createLimitOrder(binanceLib.SideTypeBuy, binanceLib.OrderTypeLimit, pair, helper.Float64ToString(tryPrice), helper.Float64ToString(amount))
-					if err == nil {
-						ok = 1
-						return order, err
-					} else {
-						fmt.Printf("Setting order error: %v\n", err)
-					}
-				}
-			}
-		} else {
-			order, err := b.createLimitOrder(binanceLib.SideTypeBuy, binanceLib.OrderTypeLimit, pair, helper.Float64ToString(buyPrice), helper.Float64ToString(amount))
-			if err == nil {
-				ok = 1
-				return order, err
-			} else {
-				fmt.Printf("Error when trying to buy: %v\n", err)
-			}
+		order, err := b.createLimitOrder(binanceLib.SideTypeBuy, binanceLib.OrderTypeLimit, pair, helper.Float64ToString(buyPrice), helper.Float64ToString(amount))
+		if err == nil {
+			ok = 1
+			return order, err
 		}
+		fmt.Printf("Error when trying to buy: %v\n", err)
 		// try again after 0.2 s
 		wait := time.Duration(interval) * time.Millisecond
 		// try again after 0.2 s
@@ -452,13 +548,13 @@ func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, delay int, 
 		age++
 		bestPirce, err := getBestPriceFromDepthEvent(event)
 		if err == nil {
-			if age % 30 == 0 {
+			if age%30 == 0 {
 				fmt.Printf("Best Price : %v, Stoploss: %v\n", bestPirce, sl)
 			}
 			if bestPirce <= sl {
 				var errs []error
 				for doneSL == 0 {
-					fmt.Println("Trying to stoploss\n")
+					fmt.Println("Trying to stoploss")
 					orders, err := b.tryToGetListOpenOrders(pair, 10)
 					if err == nil {
 						for _, order := range orders {
@@ -486,14 +582,14 @@ func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, delay int, 
 						wait := 1000 * time.Millisecond
 						time.Sleep(wait)
 					}
-					
+
 				}
 			}
-		
+
 		} else {
 			fmt.Println(err)
 		}
-	
+
 	}
 	errHandler := func(err error) {
 		results = append(results, err)
@@ -528,4 +624,44 @@ func (b *binance) tryToSellAnyway(pair string, amount float64) error {
 		tried++
 	}
 	return fmt.Errorf("Cannot sell pair %s anyway", pair)
+}
+
+// BestPriceNow best price for asks and bids
+type BestPriceNow struct {
+	ask float64
+	bid float64
+}
+
+func getBestPriceNowFromDepthEvent(event *binanceLib.WsPartialDepthEvent) (BestPriceNow, error) {
+	var result BestPriceNow
+	if len(event.Bids) == 0 {
+		return result, errors.New("Empty data from server")
+	}
+	result = BestPriceNow{
+		ask: helper.StringToFloat64(event.Asks[0].Price), bid: helper.StringToFloat64(event.Bids[0].Price),
+	}
+	return result, nil
+}
+
+// GetBestPriceChanel update price using websocket
+func (b *binance) GetBestPriceChanel(pair string) (chan BestPriceNow, chan struct{}, chan struct{}, error) {
+	c := make(chan BestPriceNow)
+	wsDepthHandler := func(event *binanceLib.WsPartialDepthEvent) {
+		bestPirce, err := getBestPriceNowFromDepthEvent(event)
+		if err == nil {
+			c <- bestPirce
+		} else {
+			fmt.Println(err)
+		}
+
+	}
+	errHandler := func(err error) {
+		fmt.Printf("Websocket error: %v\n", err)
+	}
+	doneC, stopC, err := binanceLib.WsPartialDepthServe(pair, "5", wsDepthHandler, errHandler)
+	if err != nil {
+		fmt.Printf("Websocket error: %v\n", err)
+		return c, doneC, stopC, err
+	}
+	return c, doneC, stopC, nil
 }

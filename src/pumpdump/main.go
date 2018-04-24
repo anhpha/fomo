@@ -35,6 +35,7 @@ func main() {
 	_, err := binance.GetExchangeInfo()
 
 	// lossPrice := filledPrice - b.CalculateChangePrice(or, sl, pairInfo.PriceFilter.Tick, false)
+	var terminater chan error
 
 	if err != nil {
 		errs <- fmt.Errorf("Cannot get exchange info: %v", err)
@@ -48,14 +49,25 @@ func main() {
 			// <-doneC
 			// errs <- fmt.Errorf("Stopped protecting pair %s", pair)
 		} else {
-			binance.Fomo(pair, *total, *buyPrice, *maxPrice, *tk, *sl, *race, *delay, errs)
+			terminater, err = binance.Fomo(pair, *total, *buyPrice, *maxPrice, *tk, *sl, *race, *delay, errs)
+			if err != nil {
+				errs <- fmt.Errorf("Error when trying to fomo %s", err.Error())
+				// Stop user stream
+				// terminater <- fmt.Errorf("Error when trying to fomo %s", err.Error())
+			}
 		}
 	}
 	go func() {
 		c := make(chan os.Signal)
 		signal.Notify(c, syscall.SIGINT)
+		// Stop user stream
 		errs <- fmt.Errorf("%s", <-c)
 	}()
 
-	fmt.Printf("terminated: %v\n", <-errs)
+	fmt.Printf("Terminated: %v\n", <-errs)
+	if terminater != nil {
+		terminater <- fmt.Errorf("%s", "Stopped by user")
+	}
+	fmt.Println("Ran to end")
+
 }
