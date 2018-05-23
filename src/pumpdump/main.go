@@ -42,7 +42,7 @@ func main() {
 		errs <- fmt.Errorf("Cannot get exchange info: %v", err)
 	} else {
 		if *stoplossOnly == 1 {
-			stoplossErrs := binance.TryToStopLossForOpenOders(pair, *stoplossOnlyPrice, *stoplossOnlyBTCPrice, *delay, errs)
+			stoplossErrs := binance.MonitorAndStopLossOrder(pair, *stoplossOnlyPrice, *stoplossOnlyBTCPrice, *delay, errs)
 			if len(stoplossErrs) > 0 {
 				fmt.Printf("Finished with errors: %v", stoplossErrs)
 				// stopC <- struct{}{}

@@ -296,7 +296,7 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 						// Protect filled buy monitorig and stoploss. Only start 1 time
 						if (currentExecutedOrder.currentOrderStatus == "FILLED" ||
 							currentExecutedOrder.currentOrderStatus == "PARTIALLY_FILLED") && startedStoploss == 0 {
-							go b.TryToStopLossForOpenOders(pair, sl, 0, delay, c)
+							go b.tryToStopLossForOpenOders(pair, sl, 0, delay, c)
 							startedStoploss = 1
 						}
 					}
@@ -572,9 +572,23 @@ func (b *binance) getBTCUSDTFromRedis(c *redis.Client) float64 {
 	return helper.StringToFloat64(val)
 }
 
-func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, slBTC float64, delay int, terminater chan error) []error {
+func (b *binance) MonitorAndStopLossOrder(pair string, sl float64, slBTC float64, delay int, terminater chan error) []error {
+	controlC, errs := b.tryToStopLossForOpenOders(pair, sl, slBTC, delay, terminater)
+	go func() {
+		select {
+		case <-time.After(12 * time.Hour):
+			fmt.Println("Restarting process")
+			controlC <- "Restart process"
+			controlC, errs = b.tryToStopLossForOpenOders(pair, sl, slBTC, delay, terminater)
+		}
+	}()
+	return errs
+}
+
+func (b *binance) tryToStopLossForOpenOders(pair string, sl float64, slBTC float64, delay int, terminater chan error) (chan string, []error) {
 	var results []error
 	fc := make(chan string)
+	controlChanel := make(chan string)
 	// done := 0
 	doneSL := 0
 	age := 0
@@ -590,7 +604,7 @@ func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, slBTC float
 		fmt.Println("Cannot monitor BTC")
 		panic(err)
 	}
-	defer client.Close()
+
 	stopMoniroBTCChan := b.monitorBTC(client)
 
 	wsDepthHandler := func(event *binanceLib.WsPartialDepthEvent) {
@@ -602,7 +616,7 @@ func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, slBTC float
 		if err == nil {
 			if age%30 == 0 {
 				fmt.Printf("Best BTC Price : %v, BTC Stoploss: %v\n", bestBTCPrice, slBTC)
-				fmt.Printf("Best Price : %v, Stoploss: %v\n", bestPirce, sl)
+				fmt.Printf("Best %s Price : %v, Stoploss: %v\n", pair, bestPirce, sl)
 				fmt.Println("==============================")
 			}
 			if (bestPirce <= sl) || (slBTC > 0 && slBTC >= bestBTCPrice) {
@@ -647,8 +661,8 @@ func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, slBTC float
 					}
 				}
 				fc <- "**** Done stop loss"
-				stopMoniroBTCChan <- struct{}{}
-				terminater <- fmt.Errorf("%s", "**** Done stop loss")
+				// stopMoniroBTCChan <- struct{}{}
+				// terminater <- fmt.Errorf("%s", "**** Done stop loss")
 
 			}
 
@@ -660,7 +674,7 @@ func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, slBTC float
 	errHandler := func(err error) {
 		results = append(results, err)
 		fmt.Println(err)
-		terminater <- fmt.Errorf("%s", err)
+		fc <- fmt.Sprintf("%s", err)
 	}
 	_, stopC, err := binanceLib.WsPartialDepthServe(pair, "5", wsDepthHandler, errHandler)
 	if err != nil {
@@ -669,11 +683,34 @@ func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, slBTC float
 		// stopC <- struct{}{}
 		stopMoniroBTCChan <- struct{}{}
 		terminater <- fmt.Errorf("%s", err)
-		return results
+		return controlChanel, results
 	}
-	fmt.Printf("Stop monitoring: %v\n", <-fc)
-	stopC <- struct{}{}
-	return results
+
+	go func() {
+		defer close(fc)
+		defer close(controlChanel)
+		defer client.Close()
+		for {
+			select {
+			case result := <-fc:
+				fmt.Println(result)
+				stopMoniroBTCChan <- struct{}{}
+				stopC <- struct{}{}
+				terminater <- fmt.Errorf("%s", "**** Done stop loss")
+				return
+			case <-controlChanel:
+				stopMoniroBTCChan <- struct{}{}
+				stopC <- struct{}{}
+				return
+			}
+		}
+	}()
+
+	// fmt.Printf("Stop monitoring: %v\n", <-fc)
+	// stopMoniroBTCChan <- struct{}{}
+	// stopC <- struct{}{}
+	// terminater <- fmt.Errorf("%s", "**** Done stop loss")
+	return controlChanel, results
 }
 
 func (b *binance) tryToSellAnyway(pair string, amount float64) error {

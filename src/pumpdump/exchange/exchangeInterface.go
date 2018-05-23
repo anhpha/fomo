@@ -5,7 +5,7 @@ type Market interface {
 	GetExchangeInfo() (interface{}, error)
 	GetPairInfo(symbol string) (Pair, error)
 	Fomo(pair string, amount float64, buyPrice float64, maxPrice float64, tk float64, sl float64, race int, delay int, c chan error) (terminater chan error, e error)
-	TryToStopLossForOpenOders(pair string, sl float64, slBTC float64, delay int, terminater chan error) []error
+	MonitorAndStopLossOrder(pair string, sl float64, slBTC float64, delay int, terminater chan error) []error
 	// NewInstance(key string, secret string) Market
 }
 
