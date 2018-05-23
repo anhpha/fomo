@@ -12,6 +12,8 @@ import (
 	"pumpdump/helper"
 	"time"
 
+	"github.com/go-redis/redis"
+
 	binanceLib "github.com/adshao/go-binance"
 )
 
@@ -25,6 +27,7 @@ type binance struct {
 const (
 	LOT_SIZE     = "LOT_SIZE"
 	PRICE_FILTER = "PRICE_FILTER"
+	BTCUSDT      = "BTCUSDT"
 )
 
 // NewBinance init a binance instance
@@ -293,7 +296,7 @@ func (b *binance) Fomo(pair string, amount float64, buyPrice float64, maxPrice f
 						// Protect filled buy monitorig and stoploss. Only start 1 time
 						if (currentExecutedOrder.currentOrderStatus == "FILLED" ||
 							currentExecutedOrder.currentOrderStatus == "PARTIALLY_FILLED") && startedStoploss == 0 {
-							go b.TryToStopLossForOpenOders(pair, sl, delay, c)
+							go b.TryToStopLossForOpenOders(pair, sl, 0, delay, c)
 							startedStoploss = 1
 						}
 					}
@@ -537,23 +540,75 @@ func getBestPriceFromDepthEvent(event *binanceLib.WsPartialDepthEvent) (float64,
 	return bestPrice, nil
 }
 
-func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, delay int, terminater chan error) []error {
+func (b *binance) monitorBTC(client *redis.Client) chan struct{} {
+	bestBTCPriceChan, _, stopC, err := b.GetBestPriceChanel(BTCUSDT)
+	if err != nil {
+		fmt.Println("Cannot monitor BTC")
+		panic(err)
+	}
+	go func() {
+		for {
+			select {
+			case <-stopC:
+				return
+			default:
+				currentBestPrice := <-bestBTCPriceChan
+				err := client.Set(BTCUSDT, currentBestPrice.bid, 0).Err()
+				if err != nil {
+					fmt.Printf("Cannot update BTC: %v", err)
+				}
+			}
+		}
+	}()
+	return stopC
+}
+
+func (b *binance) getBTCUSDTFromRedis(c *redis.Client) float64 {
+	val, err := c.Get(BTCUSDT).Result()
+	if err != nil {
+		fmt.Printf("Cannot get BTC price from Redis. Using 10M")
+		return 1000000.0
+	}
+	return helper.StringToFloat64(val)
+}
+
+func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, slBTC float64, delay int, terminater chan error) []error {
 	var results []error
 	fc := make(chan string)
 	// done := 0
 	doneSL := 0
 	age := 0
 
+	client := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password set
+		DB:       0,  // use default DB
+	})
+	// client.
+	_, err := client.Ping().Result()
+	if err != nil {
+		fmt.Println("Cannot monitor BTC")
+		panic(err)
+	}
+	defer client.Close()
+	stopMoniroBTCChan := b.monitorBTC(client)
+
 	wsDepthHandler := func(event *binanceLib.WsPartialDepthEvent) {
 		age++
 		bestPirce, err := getBestPriceFromDepthEvent(event)
+		bestBTCPrice := b.getBTCUSDTFromRedis(client)
+		// fmt.Printf("Best BTC Price : %v, BTC Stoploss: %v\n", bestBTCPrice, slBTC)
+		// fmt.Printf("Best Price : %v, Stoploss: %v\n", bestPirce, sl)
 		if err == nil {
 			if age%30 == 0 {
+				fmt.Printf("Best BTC Price : %v, BTC Stoploss: %v\n", bestBTCPrice, slBTC)
 				fmt.Printf("Best Price : %v, Stoploss: %v\n", bestPirce, sl)
+				fmt.Println("==============================")
 			}
-			if bestPirce <= sl {
-				var errs []error
+			if (bestPirce <= sl) || (slBTC > 0 && slBTC >= bestBTCPrice) {
 				for doneSL == 0 {
+					var errs []error
+					// errs = []{}
 					fmt.Println("Trying to stoploss")
 					orders, err := b.tryToGetListOpenOrders(pair, 10)
 					if err == nil {
@@ -577,13 +632,24 @@ func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, delay int, 
 
 					if len(errs) == 0 {
 						doneSL = 1
-						fc <- "**** Done stop loss"
 					} else {
 						wait := 1000 * time.Millisecond
 						time.Sleep(wait)
 					}
 
 				}
+				if doneSL == 1 && slBTC >= bestBTCPrice {
+					err = b.tryToSellAllBTCAnyway()
+					if err == nil {
+						fmt.Println("Sell all btc")
+					} else {
+						fmt.Println("Cannot sell all btc")
+					}
+				}
+				fc <- "**** Done stop loss"
+				stopMoniroBTCChan <- struct{}{}
+				terminater <- fmt.Errorf("%s", "**** Done stop loss")
+
 			}
 
 		} else {
@@ -600,10 +666,13 @@ func (b *binance) TryToStopLossForOpenOders(pair string, sl float64, delay int, 
 	if err != nil {
 		fmt.Println(err)
 		results = append(results, err)
-		stopC <- struct{}{}
+		// stopC <- struct{}{}
+		stopMoniroBTCChan <- struct{}{}
 		terminater <- fmt.Errorf("%s", err)
+		return results
 	}
 	fmt.Printf("Stop monitoring: %v\n", <-fc)
+	stopC <- struct{}{}
 	return results
 }
 
@@ -624,6 +693,29 @@ func (b *binance) tryToSellAnyway(pair string, amount float64) error {
 		tried++
 	}
 	return fmt.Errorf("Cannot sell pair %s anyway", pair)
+}
+
+func (b *binance) tryToSellAllBTCAnyway() error {
+	ok := 0
+	tried := 0
+	for ok == 0 && tried < 10 {
+		btcAmount, err := b.tryToGetBalance("BTC")
+		if err == nil {
+			order, err := b.worker.NewCreateOrderService().Symbol("BTCUSDT").
+				Side(binanceLib.SideTypeSell).Type(binanceLib.OrderTypeMarket).Quantity(helper.Float64ToString(btcAmount)).Do(context.Background())
+			if err == nil {
+				ok = 1
+				fmt.Printf("Sold BTC by order ID: %v", order.OrderID)
+				return nil
+			}
+		}
+
+		// try again after 0.2 s
+		wait := 500 * time.Millisecond
+		time.Sleep(wait)
+		tried++
+	}
+	return fmt.Errorf("Cannot sell pair %s anyway", "BTC")
 }
 
 // BestPriceNow best price for asks and bids
@@ -664,4 +756,26 @@ func (b *binance) GetBestPriceChanel(pair string) (chan BestPriceNow, chan struc
 		return c, doneC, stopC, err
 	}
 	return c, doneC, stopC, nil
+}
+
+func (b *binance) tryToGetBalance(pair string) (float64, error) {
+	ok := 0
+	tried := 0
+	for ok == 0 && tried < 10 {
+		acc, err := b.worker.NewGetAccountService().Do(context.Background())
+		if err == nil {
+			for _, balance := range acc.Balances {
+				if pair == balance.Asset {
+					ok = 1
+					return helper.StringToFloat64(balance.Free), nil
+				}
+			}
+			return 0, nil
+		}
+		// try again after 0.2 s
+		wait := 500 * time.Millisecond
+		time.Sleep(wait)
+		tried++
+	}
+	return 0, fmt.Errorf("Cannot sell pair %s anyway", pair)
 }
